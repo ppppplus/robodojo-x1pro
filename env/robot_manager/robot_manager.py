@@ -403,6 +403,8 @@ class RobotManager:
                     joint_ids=robot.gripper_joint_indices,
                     env_ids=env_ids,
                 )  # gripper
+                if hasattr(robot, 'sync_gripper_motor_target'):
+                    robot.sync_gripper_motor_target(arm, gripper_position, env_ids)
             else:
                 pass
 
@@ -673,6 +675,7 @@ class RobotManager:
 
 
 ROBOT_CLASS_REGISTRY = {
+    "ex001": {"module": "ex001", "classes": ("EX001Left", "EX001Right")},
     "franka": {
         "module": "franka",
         "classes": ("Franka",),
@@ -685,6 +688,7 @@ ROBOT_CLASS_REGISTRY = {
 
 
 ROBOT_CONFIG_REGISTRY = {
+    "ex001": "ex001",
     "franka": "franka",
     "x5": "x5",
 }

@@ -1,0 +1,9 @@
+# Select before launch: ROBODOJO_EX001_GRIPPER=fx001_h_evt1 (default) or rm001_g1_dvt1
+robots:
+  - robot_type: arm
+    robot_name: ex001
+    coupled: true
+    need_planner: false
+    default_root_pos: [0.0, -0.65, 0.0]
+    default_root_rot: [0.7071067811865476, 0.0, 0.0, 0.7071067811865476]
+    enabled_self_collisions: false

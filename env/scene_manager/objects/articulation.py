@@ -232,8 +232,13 @@ class ArticulationObject(SingleArticulation):
     def initialize(self):
         self.physics_sim_view = SimulationManager.get_physics_sim_view()
         super().initialize(physics_sim_view=self.physics_sim_view)
-        self.upper_joint_positions = self.dof_properties["upper"].copy()
-        self.lower_joint_positions = self.dof_properties["lower"].copy()
+        # Only limits are needed here. SingleArticulation.dof_properties builds
+        # a NumPy table from CUDA max-effort tensors in Isaac Sim 5.0.
+        limits = self._articulation_view.get_dof_limits()[0]
+        if isinstance(limits, torch.Tensor):
+            limits = limits.detach().cpu().numpy()
+        self.lower_joint_positions = np.asarray(limits)[:, 0].copy()
+        self.upper_joint_positions = np.asarray(limits)[:, 1].copy()
         self.initial_joint_positions = self.get_current_joint_positions()
         self.initial_drive_targets = self._capture_drive_targets()
         self.app = omni.kit.app.get_app()
