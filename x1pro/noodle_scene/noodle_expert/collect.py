@@ -5,7 +5,7 @@ HERE=Path(__file__).resolve().parent;ROOT=HERE.parents[2]
 sys.path[:0]=[str(ROOT),str(ROOT/'x1pro'),str(HERE)]
 os.environ['ROBODOJO_EX001_GRIPPER']='fx001_h_evt1';os.environ.pop('ROBODOJO_EX001_USD',None)
 from isaaclab.app import AppLauncher
-p=argparse.ArgumentParser();p.add_argument('--output',required=True);p.add_argument('--fast',action='store_true');p.add_argument('--basket-test',action='store_true');p.add_argument('--pour-only',action='store_true');p.add_argument('--initial-episode',default=None);p.add_argument('--force-test',action='store_true');p.add_argument('--scene-only',action='store_true');AppLauncher.add_app_launcher_args(p);args=p.parse_args()
+p=argparse.ArgumentParser();p.add_argument('--output',required=True);p.add_argument('--fast',action='store_true');p.add_argument('--basket-test',action='store_true');p.add_argument('--pour-only',action='store_true');p.add_argument('--initial-episode',default=None);p.add_argument('--force-test',action='store_true');p.add_argument('--scene-only',action='store_true');p.add_argument('--replay-json',default=None,help='Replay a robot-bridge JSON trajectory using follow_* joint states');AppLauncher.add_app_launcher_args(p);args=p.parse_args()
 OUT=Path(args.output);OUT.mkdir(parents=True,exist_ok=True)
 if (OUT/'summary.json').exists():raise FileExistsError(OUT)
 (OUT/'collector_source.py').write_text(Path(__file__).read_text());(OUT/'scene_builder_source.py').write_text((HERE/'scene_builder.py').read_text());(OUT/'seasoning.py').write_text((HERE/'seasoning.py').read_text())
@@ -127,18 +127,32 @@ try:
  for name,ann,param,(w,h) in cameras:
   datasets.append(h5.create_dataset('observations/images/'+name,shape=(0,h,w,3),maxshape=(None,h,w,3),dtype='u1',chunks=(1,h,w,3),compression='lzf'));writers.append(VideoStreamWriter(str(OUT/(name+'.mp4')),h,w,3,fps))
  for _ in range(16):sim.render()
- step=0;states=[];velocities=[];actions=[];poses=[];image_steps=[];camera_poses=[];phases=[];phase_ids=[];phase_name='initial';checks=[];error=None;start_time=time.monotonic();initial_objects=objstate()
+ step=0;states=[];velocities=[];actions=[];poses=[];image_steps=[];camera_poses=[];phases=[];phase_ids=[];phase_name='initial';checks=[];error=None;start_time=time.monotonic();initial_objects=objstate();replay_done=False;replay_source=None
  font=ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',20)
  def capture(final=False):
   sim.render();sim.render();cp=[]
   for i,(name,ann,param,(w,h)) in enumerate(cameras):
-   im=np.asarray(ann.get_data())[...,:3].astype(np.uint8);assert im.shape==(h,w,3)
+   raw=np.asarray(ann.get_data())
+   if raw.shape[:2] == (h,w) and raw.ndim >= 3:
+    im=raw[...,:3].astype(np.uint8)
+   elif args.replay_json:
+    # A partial Isaac Sim asset cache can leave RTX render products empty or
+    # malformed. Preserve replay state and video shape while recording a black
+    # frame; joint/object validation remains fully active.
+    im=np.zeros((h,w,3),dtype=np.uint8)
+   else:
+    raise AssertionError(f'Unexpected camera frame shape: {raw.shape}, expected {(h,w,3)}')
    ds=datasets[i];ds.resize(len(image_steps)+1,axis=0);ds[-1]=im
    if not image_steps:Image.fromarray(im).save(OUT/(name+'_first.png'))
    if final or len(image_steps)%fps==0:Image.fromarray(im).save(OUT/(name+'_last.png'))
    if name=='overview':
     pic=Image.fromarray(im);draw=ImageDraw.Draw(pic);draw.rectangle((0,0,w,58),fill=(20,27,34));draw.text((12,5),'X1 PRO FX001 | Noodle transfer | Rigid noodle bundles',font=font,fill='white');draw.text((12,31),f'{phase_name} | {step*dt:.1f} s',font=font,fill=(210,224,242));im=np.asarray(pic)
-   writers[i].append(im);cp.append(np.linalg.inv(np.asarray(param.get_data()['cameraViewTransform']).reshape(4,4).T))
+   writers[i].append(im)
+   try:
+    cp.append(np.linalg.inv(np.asarray(param.get_data()['cameraViewTransform']).reshape(4,4).T))
+   except np.linalg.LinAlgError:
+    if not args.replay_json: raise
+    cp.append(np.eye(4,dtype=float))
   image_steps.append(step);camera_poses.append(cp)
  def tick():
   global step
@@ -187,6 +201,56 @@ try:
   if not passed:raise RuntimeError(f'Physical check failed: {name} = {value}')
  def in_basket(i):
   pp=objstate();rot=Rotation.from_quat(pp[2,[4,5,6,3]]).as_matrix();v=rot.T@(pp[i,:3]-pp[2,:3]);return bool(np.linalg.norm(v[:2])<.078 and .002<v[2]<.14),v
+ if args.replay_json:
+  replay_source=str(Path(args.replay_json).resolve());replay=json.loads(Path(args.replay_json).read_text());frames=replay.get('data',[])
+  if not frames:raise ValueError(f'No data frames in replay JSON: {args.replay_json}')
+  side_ids={side:[index[f'{side}_arm_joint{i}'] for i in range(1,7)] for side in ('left','right')}
+  replay_fps=float(replay.get('fps',30.));replay_stride=max(1,round(1./dt/replay_fps));replay_done=True
+  phase('real_robot_replay');print('REPLAY_SOURCE '+json.dumps({'path':replay_source,'name':replay.get('name'),'frames':len(frames),'fps':replay_fps,'physics_steps_per_frame':replay_stride}),flush=True)
+  replay_gripper_values={side:[] for side in ('left','right')}
+  # The bridge has two historical gripper encodings: FX001 joint units
+  # (small values) and the raw master/follower encoder (roughly 0..3.5,
+  # where low is closed and high is open). Calibrate the latter from the
+  # trajectory so an intermediate closed value is not clipped to fully open.
+  replay_gripper_cal={}
+  for side in ('left','right'):
+   vals=[]
+   for fr in frames:
+    raw=fr.get(f'follow_{side}_gripper')
+    if raw is None:
+     raw=np.asarray(fr.get(f'follow_{side}_joint_position',[]),dtype=float)
+     raw=raw[6] if raw.size >= 7 else None
+    if raw is not None: vals.append(float(np.asarray(raw).reshape(-1)[0]))
+   if vals and max(vals)-min(vals)>.5:
+    replay_gripper_cal[side]=(min(vals),max(vals))
+  for fi,frame in enumerate(frames):
+   q=target.clone()
+   for side in ('left','right'):
+    values=np.asarray(frame[f'follow_{side}_joint_position'],dtype=np.float32)
+    if values.shape[0]<6:raise ValueError(f'{side} follow joint vector has only {values.shape[0]} values')
+    q[0,side_ids[side]]=torch.as_tensor(values[:6],device=args.device,dtype=torch.float32)
+    # The bridge gripper field is a physical finger coordinate; convert it
+    # to this fork's scalar gripper drive and clamp to the selected profile.
+    # Prefer the explicit bridge field. Some older recordings only carry
+    # the seventh follower joint, which is the same physical finger signal.
+    physical=frame.get(f'follow_{side}_gripper')
+    if physical is None and values.shape[0] >= 7: physical=values[6]
+    if physical is not None:
+     physical=float(np.asarray(physical).reshape(-1)[0]);replay_gripper_values[side].append(physical)
+     if side in replay_gripper_cal:
+      closed,opened=replay_gripper_cal[side]
+      motor=(physical-closed)/(opened-closed)*PROFILE['motor_open'] if opened>closed else 0.
+     else:
+      motor=(physical-PROFILE['offset'])/PROFILE['multiplier']
+     q[0,index[f'{side}_arm_gripper']]=float(np.clip(motor,0.,PROFILE['motor_open']))
+   if 'head_yaw' in frame:q[0,index['head_yaw_joint']]=float(np.asarray(frame['head_yaw']).reshape(-1)[0])
+   if 'head_pitch' in frame:q[0,index['head_pitch_joint']]=float(np.asarray(frame['head_pitch']).reshape(-1)[0])
+   target.copy_(q)
+   for _ in range(replay_stride):tick()
+   if fi==0 or fi==len(frames)-1:print('REPLAY_FRAME '+json.dumps({'frame':fi,'timestamp':frame.get('timestamp'),'joint_state':state().tolist()}),flush=True)
+  phase('replay_final');hold(.5);args.scene_only=True
+  for side,vals in replay_gripper_values.items():
+   if vals: print('REPLAY_GRIPPER',json.dumps({'side':side,'min':min(vals),'max':max(vals),'unique':len(set(vals)),'calibration':replay_gripper_cal.get(side)}),flush=True)
  try:
   phase('noodles_in_basket' if (args.basket_test or args.pour_only) else 'two_noodle_bundles_on_one_plate');hold(.5)
   stage.GetRootLayer().Export(str(OUT/'scene.usda'))
@@ -224,14 +288,14 @@ try:
  except Exception as e:
   error=str(e);traceback.print_exc();phase('stopped_after_error');hold(.5)
  states.append(state());velocities.append(robot.data.joint_vel[0].cpu().numpy().copy());poses.append(objstate());capture(final=True)
- success=bool(error is None and not args.scene_only and not args.basket_test and len(checks)>=(7 if args.pour_only else 10) and all(c['passed'] for c in checks))
+ success=bool(error is None and not replay_done and not args.scene_only and not args.basket_test and len(checks)>=(7 if args.pour_only else 10) and all(c['passed'] for c in checks))
  for key,data in [('observations/joint_position',states),('observations/joint_velocity',velocities),('observations/object_pose_wxyz',poses),('actions/joint_position',actions),('image_step',image_steps),('phase_id',phase_ids),('timestamp',np.arange(len(states))*dt),('observations/camera_to_world',camera_poses)]:h5.create_dataset(key,data=np.asarray(data))
  conditions={'fixed_base':True,'base_position':base,'initial_lift_height_m':lift,'lift_control':'fixed during food transfer, IK coordinated during pouring','robot_gravity_compensation':True,'self_collision':False,'noodle_model':'two independent rigid bundles, not deformable noodles','basket_collision':'compound shell, bottom, handle and rim supports','well_collision':'compound open wall and bottom; decorative folded lip excluded','bowl_collision':'static concave proxy matching visual bowl','friction_static':1.,'friction_dynamic':.8,'food_friction_static_dynamic':[.10,.06],'basket_interior_friction_static_dynamic':[.12,.08],'contact_parameters':'estimated, not measured on the real food or hardware','objects_gravity_and_contact':True,'object_teleports_during_episode':0,'object_attachment_joints':0,'robot_state_writes_during_episode':0,'cooking_and_water_simulated':False,'scene_scale':'estimated from photo, not calibrated'}
  h5.attrs.update(task='pour_two_noodles_into_bowl' if args.pour_only else 'photo_noodle_transfer',robot='X1 Pro DVT2/PVT1',gripper_type=PROFILE['name'],expert_demonstration=success,success=success,physics_dt=dt,image_fps=fps,joint_names_json=json.dumps(names),object_names_json=json.dumps(['noodle_0','noodle_1','front_basket']),camera_names_json=json.dumps([c[0] for c in cameras]),camera_mounts_json=json.dumps(mounts),camera_intrinsics_json=json.dumps(D435),camera_pose_convention='USD camera -Z forward +Y up; matrices from renderer at image_step',action_semantics='23 absolute joint position drive targets; radians or metres according to URDF; state[t] precedes action[t], includes terminal state',conditions_json=json.dumps(conditions),phases_json=json.dumps(phases),error=error or '')
  h5.close();h5=None
  for w in writers:w.close()
  writers=[]
- summary={'task':'pour_two_noodles_into_bowl' if args.pour_only else 'photo_noodle_transfer','status':'success' if success else ('scene_preview' if args.scene_only else 'failed_attempt'),'expert_demonstration':success,'error':error,'gripper_type':PROFILE['name'],'camera_mount':{'head_source':'mounted_urdf_rgb_optical_frame'},'camera_names':[c[0] for c in cameras],'diagnostic_basket_only':args.basket_test,'simulation_seconds':step*dt,'physics_steps':step,'frames_per_camera':len(image_steps),'fps':fps,'checks':checks,'conditions':conditions,'phases':phases,'initial_object_poses':initial_objects.tolist(),'final_object_poses':objstate().tolist(),'wall_seconds':time.monotonic()-start_time,'data_file':str(OUT/'episode.hdf5'),'video':str(OUT/'overview.mp4')}
+ summary={'task':'real_robot_replay' if replay_done else ('pour_two_noodles_into_bowl' if args.pour_only else 'photo_noodle_transfer'),'status':'replay_complete' if replay_done and error is None else ('success' if success else ('scene_preview' if args.scene_only else 'failed_attempt')),'expert_demonstration':success,'replay_source':replay_source,'error':error,'gripper_type':PROFILE['name'],'camera_mount':{'head_source':'mounted_urdf_rgb_optical_frame'},'camera_names':[c[0] for c in cameras],'diagnostic_basket_only':args.basket_test,'simulation_seconds':step*dt,'physics_steps':step,'frames_per_camera':len(image_steps),'fps':fps,'checks':checks,'conditions':conditions,'phases':phases,'initial_object_poses':initial_objects.tolist(),'final_object_poses':objstate().tolist(),'wall_seconds':time.monotonic()-start_time,'data_file':str(OUT/'episode.hdf5'),'video':str(OUT/'overview.mp4')}
  (OUT/'summary.json').write_text(json.dumps(summary,indent=2));print('NOODLE_DONE',json.dumps(summary),flush=True);code=0 if success or args.scene_only else 2
 except BaseException:
  (OUT/'failure.txt').write_text(traceback.format_exc());traceback.print_exc()

@@ -63,3 +63,16 @@ This scene uses a bamboo table, two independent rigid noodle bundles on one plat
 The sample code finds the repository root from its own file path. It does not use the original workspace location. RoboDojo's downloaded `Assets/` remain provided by the upstream asset installer. Existing USD scene exports and recorded HDF5 datasets may contain paths from the machine that produced them; regenerate those on the destination machine. The collector previously ran in the source workspace. This isolated fork passed static asset and syntax checks; a fresh runtime render in the fork is still pending because Isaac Sim stalled during extension startup on this machine. An independent install also needs validation.
 
 The X1 Pro USD and URDF model files are derived from user-provided X1 Pro URDF/mesh archives. Their right to redistribution has not been established in this workspace. The code-only branch can be shared independently; publishing the model bundle, even in a separate dataset repository, requires checking the asset owner's terms. RoboDojo's [license](../LICENSE) allows non-commercial research, education and evaluation, and requires separate permission for commercial use.
+
+## Replay a real X1 Pro trajectory
+
+The noodle collector can replay a robot-bridge JSON trajectory without teleporting the robot or objects:
+
+```bash
+python x1pro/noodle_scene/noodle_expert/collect.py \
+  --output data/replay_result \
+  --replay-json /path/to/episode.json \
+  --fast --headless --enable_cameras --device cuda:0
+```
+
+The JSON uses the bridge `follow_*_joint_position`, `follow_*_gripper`, `head_yaw`, and `head_pitch` fields. The replay accepts both the small FX001 joint-unit encoding and the historical raw follower/master gripper encoder. For the latter it calibrates the trajectory range so the low signal is closed and the high signal is open, and prints a `REPLAY_GRIPPER` diagnostic. Outputs include `summary.json`, `episode.hdf5`, and `overview.mp4`; replay runs are marked `replay_complete` rather than as generated expert demonstrations.
