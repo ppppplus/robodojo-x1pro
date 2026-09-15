@@ -81,7 +81,7 @@ try:
  for i in range(2):UsdShade.MaterialBindingAPI.Apply(stage.GetPrimAtPath(f'/World/Set/Noodle{i}/Collision')).Bind(food_mat,materialPurpose='physics')
  for prim in stage.GetPrimAtPath('/World/Set/MovingBasket').GetChildren():
   if prim.GetName().startswith('Wall') or prim.GetName()=='Bottom':UsdShade.MaterialBindingAPI.Apply(prim).Bind(slide_mat,materialPurpose='physics')
- PROFILE=gripper_profile();base=(.05,-.65,0);lift=.75
+ PROFILE=gripper_profile();base=(.05,-.65,0);lift=.45
  cfg=get_robot_config();cfg.prim_path='/World/EX001';cfg.init_state.pos=base;cfg.init_state.rot=(.707106781,0,0,.707106781);cfg.init_state.joint_pos['lift_joint']=lift;cfg.init_state.joint_pos['head_pitch_joint']=.45
  robot=Articulation(cfg)
  # Keep the original imported finger geometry and frictional contact; no grasp joints.
