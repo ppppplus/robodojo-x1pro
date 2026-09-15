@@ -5,7 +5,7 @@ HERE=Path(__file__).resolve().parent;ROOT=HERE.parents[2]
 sys.path[:0]=[str(ROOT),str(ROOT/'x1pro'),str(HERE)]
 os.environ['ROBODOJO_EX001_GRIPPER']='fx001_h_evt1';os.environ.pop('ROBODOJO_EX001_USD',None)
 from isaaclab.app import AppLauncher
-p=argparse.ArgumentParser();p.add_argument('--output',required=True);p.add_argument('--fast',action='store_true');p.add_argument('--basket-test',action='store_true');p.add_argument('--pour-only',action='store_true');p.add_argument('--initial-episode',default=None);p.add_argument('--force-test',action='store_true');p.add_argument('--scene-only',action='store_true');p.add_argument('--replay-json',default=None,help='Replay a robot-bridge JSON trajectory using follow_* joint states');AppLauncher.add_app_launcher_args(p);args=p.parse_args()
+p=argparse.ArgumentParser();p.add_argument('--output',required=True);p.add_argument('--fast',action='store_true');p.add_argument('--basket-test',action='store_true');p.add_argument('--pour-only',action='store_true');p.add_argument('--initial-episode',default=None);p.add_argument('--force-test',action='store_true');p.add_argument('--scene-only',action='store_true');p.add_argument('--replay-json',default=None,help='Replay a robot-bridge JSON trajectory using follow_* joint states');p.add_argument('--openpi-steps',type=int,default=0,help='Run this many 15 Hz OpenPI policy decisions in the scene');p.add_argument('--openpi-host',default='127.0.0.1');p.add_argument('--openpi-port',type=int,default=8000);p.add_argument('--openpi-prompt',default='Pick up noodles from white plate and put them into the cooking pot.');AppLauncher.add_app_launcher_args(p);args=p.parse_args()
 OUT=Path(args.output);OUT.mkdir(parents=True,exist_ok=True)
 if (OUT/'summary.json').exists():raise FileExistsError(OUT)
 (OUT/'collector_source.py').write_text(Path(__file__).read_text());(OUT/'scene_builder_source.py').write_text((HERE/'scene_builder.py').read_text());(OUT/'seasoning.py').write_text((HERE/'seasoning.py').read_text())
@@ -127,7 +127,7 @@ try:
  for name,ann,param,(w,h) in cameras:
   datasets.append(h5.create_dataset('observations/images/'+name,shape=(0,h,w,3),maxshape=(None,h,w,3),dtype='u1',chunks=(1,h,w,3),compression='lzf'));writers.append(VideoStreamWriter(str(OUT/(name+'.mp4')),h,w,3,fps))
  for _ in range(16):sim.render()
- step=0;states=[];velocities=[];actions=[];poses=[];image_steps=[];camera_poses=[];phases=[];phase_ids=[];phase_name='initial';checks=[];error=None;start_time=time.monotonic();initial_objects=objstate();replay_done=False;replay_source=None
+ step=0;states=[];velocities=[];actions=[];poses=[];image_steps=[];camera_poses=[];phases=[];phase_ids=[];phase_name='initial';checks=[];error=None;start_time=time.monotonic();initial_objects=objstate();replay_done=False;replay_source=None;latest_images={};openpi_events=[]
  font=ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',20)
  def capture(final=False):
   sim.render();sim.render();cp=[]
@@ -142,6 +142,7 @@ try:
     im=np.zeros((h,w,3),dtype=np.uint8)
    else:
     raise AssertionError(f'Unexpected camera frame shape: {raw.shape}, expected {(h,w,3)}')
+   latest_images[name]=im.copy()
    ds=datasets[i];ds.resize(len(image_steps)+1,axis=0);ds[-1]=im
    if not image_steps:Image.fromarray(im).save(OUT/(name+'_first.png'))
    if final or len(image_steps)%fps==0:Image.fromarray(im).save(OUT/(name+'_last.png'))
@@ -251,6 +252,62 @@ try:
   phase('replay_final');hold(.5);args.scene_only=True
   for side,vals in replay_gripper_values.items():
    if vals: print('REPLAY_GRIPPER',json.dumps({'side':side,'min':min(vals),'max':max(vals),'unique':len(set(vals)),'calibration':replay_gripper_cal.get(side)}),flush=True)
+ if args.openpi_steps:
+  if args.fast:raise ValueError('--openpi-steps requires the two wrist cameras; omit --fast')
+  from openpi_bridge import OpenPiClient,Smp2SmpSequence
+  # The raw X2Robot poses are control-frame coordinates.  The adapter anchors
+  # their recorded rest poses at the corresponding simulated TCP pose, so the
+  # policy retains its trained local geometry while IK remains in USD world axes.
+  refs={'left':np.array([.0030,-.0012,.0039,-.1625,.0019,.0775,-.0078],dtype=np.float32),'right':np.array([-.0046,-.0075,.0620,.0977,-.2749,-.0446,-.0143],dtype=np.float32)}
+  kin={side:Kinematics(PROFILE['urdf'],side=side,base=base,lift=lift,tcp=nominal_tcp(PROFILE)) for side in ('left','right')}
+  arm_index={side:[index[f'{side}_arm_joint{i}'] for i in range(1,7)] for side in ('left','right')}
+  motor_index={side:index[f'{side}_arm_gripper'] for side in ('left','right')}
+  def tcp_pose(side):
+   kk=kin[side];kk.lift=float(state()[index['lift_joint']]);return kk.fk(state()[arm_index[side]])
+  home={side:tcp_pose(side) for side in ('left','right')}
+  def policy_slave():
+   values=[]
+   for side in ('left','right'):
+    current=tcp_pose(side);rotation=Rotation.from_matrix(home[side][:3,:3].T@current[:3,:3]).as_euler('xyz')
+    position=refs[side][:3]+current[:3,3]-home[side][:3,3]
+    motor=float(state()[motor_index[side]])
+    gripper=refs[side][6]+motor/PROFILE['motor_open']*3.5847
+    values.extend([*position,* (refs[side][3:6]+rotation),gripper])
+   return np.asarray(values,dtype=np.float32)
+  def target_from_master(master):
+   goal=target.clone();diagnostics=[]
+   for offset,side in ((0,'left'),(7,'right')):
+    current=tcp_pose(side);raw=np.asarray(master[offset:offset+7],dtype=float)
+    desired_pos=home[side][:3,3]+raw[:3]-refs[side][:3]
+    displacement=desired_pos-current[:3,3];distance=float(np.linalg.norm(displacement))
+    if distance>.035:desired_pos=current[:3,3]+displacement/distance*.035
+    desired_rot=home[side][:3,:3]@Rotation.from_euler('xyz',raw[3:6]-refs[side][3:6]).as_matrix()
+    rel=Rotation.from_matrix(desired_rot@current[:3,:3].T);angle=rel.magnitude()
+    if angle>.28:desired_rot=Rotation.from_rotvec(rel.as_rotvec()/angle*.28).as_matrix()@current[:3,:3]
+    q=kin[side].ik(desired_pos,desired_rot,state()[arm_index[side]],attempts=6)
+    goal[0,arm_index[side]]=torch.as_tensor(q,device=args.device,dtype=torch.float32)
+    motor=(raw[6]-refs[side][6])/3.5847*PROFILE['motor_open']
+    goal[0,motor_index[side]]=float(np.clip(motor,0.,PROFILE['motor_open']))
+    diagnostics.append({'side':side,'target_position':desired_pos.tolist(),'translation_clamped_m':max(0.,distance-.035),'rotation_clamped_rad':max(0.,angle-.28),'motor_target':float(goal[0,motor_index[side]])})
+   return goal,diagnostics
+  phase('openpi_policy_rollout');capture()
+  client=OpenPiClient(args.openpi_host,args.openpi_port)
+  sequence=Smp2SmpSequence(policy_slave())
+  try:
+   for decision in range(args.openpi_steps):
+    policy_cameras={'face_view':'cam_head','left_wrist_view':'cam_left_wrist','right_wrist_view':'cam_right_wrist'}
+    for policy_name,camera_name in policy_cameras.items():
+     if camera_name not in latest_images:raise RuntimeError(f'Missing OpenPI camera frame: {camera_name} for {policy_name}')
+    images={policy_name:np.asarray(Image.fromarray(latest_images[camera_name]).resize((320,240)),dtype=np.uint8) for policy_name,camera_name in policy_cameras.items()}
+    slave=policy_slave();result=client.infer(sequence.observation(slave,images,args.openpi_prompt));master=sequence.commit(slave,result)
+    goal,diagnostics=target_from_master(master);start=target.clone()
+    for alpha in np.linspace(0.,1.,16)[1:]:target.copy_(start+(goal-start)*alpha);tick()
+    event={'decision':decision,'master_target':master.tolist(),'phase':sequence.phase,'server_timing':{k:float(v) for k,v in result.get('server_timing',{}).items()},'controller':diagnostics}
+    openpi_events.append(event);print('OPENPI_STEP',json.dumps(event),flush=True);capture()
+  finally:
+   client.close()
+  (OUT/'openpi_policy.json').write_text(json.dumps({'prompt':args.openpi_prompt,'decisions':openpi_events,'observation_shape':[7,29],'image_shape':[240,320,3],'control_hz':15},indent=2))
+  args.scene_only=True
  try:
   phase('noodles_in_basket' if (args.basket_test or args.pour_only) else 'two_noodle_bundles_on_one_plate');hold(.5)
   stage.GetRootLayer().Export(str(OUT/'scene.usda'))
@@ -295,7 +352,7 @@ try:
  h5.close();h5=None
  for w in writers:w.close()
  writers=[]
- summary={'task':'real_robot_replay' if replay_done else ('pour_two_noodles_into_bowl' if args.pour_only else 'photo_noodle_transfer'),'status':'replay_complete' if replay_done and error is None else ('success' if success else ('scene_preview' if args.scene_only else 'failed_attempt')),'expert_demonstration':success,'replay_source':replay_source,'error':error,'gripper_type':PROFILE['name'],'camera_mount':{'head_source':'mounted_urdf_rgb_optical_frame'},'camera_names':[c[0] for c in cameras],'diagnostic_basket_only':args.basket_test,'simulation_seconds':step*dt,'physics_steps':step,'frames_per_camera':len(image_steps),'fps':fps,'checks':checks,'conditions':conditions,'phases':phases,'initial_object_poses':initial_objects.tolist(),'final_object_poses':objstate().tolist(),'wall_seconds':time.monotonic()-start_time,'data_file':str(OUT/'episode.hdf5'),'video':str(OUT/'overview.mp4')}
+ summary={'task':'openpi_policy_rollout' if args.openpi_steps else ('real_robot_replay' if replay_done else ('pour_two_noodles_into_bowl' if args.pour_only else 'photo_noodle_transfer')),'status':'openpi_rollout_complete' if args.openpi_steps and error is None else ('replay_complete' if replay_done and error is None else ('success' if success else ('scene_preview' if args.scene_only else 'failed_attempt'))) ,'expert_demonstration':success,'replay_source':replay_source,'error':error,'gripper_type':PROFILE['name'],'camera_mount':{'head_source':'mounted_urdf_rgb_optical_frame'},'camera_names':[c[0] for c in cameras],'diagnostic_basket_only':args.basket_test,'simulation_seconds':step*dt,'physics_steps':step,'frames_per_camera':len(image_steps),'fps':fps,'checks':checks,'conditions':conditions,'phases':phases,'initial_object_poses':initial_objects.tolist(),'final_object_poses':objstate().tolist(),'wall_seconds':time.monotonic()-start_time,'data_file':str(OUT/'episode.hdf5'),'video':str(OUT/'overview.mp4'),'openpi':{'decisions':len(openpi_events),'prompt':args.openpi_prompt if args.openpi_steps else None,'trace':str(OUT/'openpi_policy.json') if args.openpi_steps else None}}
  (OUT/'summary.json').write_text(json.dumps(summary,indent=2));print('NOODLE_DONE',json.dumps(summary),flush=True);code=0 if success or args.scene_only else 2
 except BaseException:
  (OUT/'failure.txt').write_text(traceback.format_exc());traceback.print_exc()
