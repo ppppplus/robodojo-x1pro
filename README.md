@@ -1,3 +1,56 @@
+# RoboDojo X1 Pro Community Fork
+
+This repository is a community extension of RoboDojo for the X-Square X1 Pro
+(EX001). It adds the fixed-base dual-arm robot, selectable FX001 parallel and
+RM001 rotary grippers, robot-mounted cameras, scripted X1 Pro data collection,
+a noodle-cooking scene, and real-robot trajectory replay.
+
+For the original benchmark, installation requirements, tasks, and policy
+integration, see the [official RoboDojo README](https://github.com/RoboDojo-Benchmark/RoboDojo#readme)
+and [official documentation](https://robodojo-benchmark.com/doc/).
+
+## Install the X1 Pro assets
+
+The large X1 Pro USD, URDF, mesh, and texture files are distributed separately
+from Git. The public asset bundle is available from
+[Google Drive](https://drive.google.com/drive/folders/1yjbJ4eWfCZwoM0ejFrjkhuAvDq_T4YAK?usp=sharing)
+and contains both supported variants:
+
+```text
+x1pro-assets/
+  fx001_h_evt1/
+  rm001_g1_dvt1/
+```
+
+After cloning this repository and installing the upstream RoboDojo environment
+and `Assets/`, download the public folder from the command line with `gdown`:
+
+```bash
+python3 -m pip install gdown
+mkdir -p .cache
+python3 -m gdown --folder \
+  "https://drive.google.com/drive/folders/1yjbJ4eWfCZwoM0ejFrjkhuAvDq_T4YAK?usp=sharing" \
+  -O .cache/x1pro-assets
+bash x1pro/init_assets.sh --from-dir .cache/x1pro-assets
+python3 x1pro/check_install.py
+```
+
+`init_assets.sh` validates both gripper variants and creates the ignored
+`x1pro/assets` symlink expected by the simulator. If the folder was downloaded
+through a browser, extract it and pass its path instead:
+
+```bash
+bash x1pro/init_assets.sh --from-dir /path/to/x1pro-assets
+python3 x1pro/check_install.py
+```
+
+See [x1pro/README.md](x1pro/README.md) for gripper selection, scene preview,
+expert collection, and real-trajectory replay commands.
+
+---
+
+## Upstream RoboDojo README
+
 <div align="center">
 
 <img src="https://media.luminis-sim.com/media/challenge/posters/robodojo_logo.png"></img>
@@ -135,7 +188,3 @@ Released under the [RoboDojo Non-Commercial Research License](LICENSE). RoboDojo
   <img alt="Isaac Lab 2.3" src="https://img.shields.io/badge/Isaac_Lab-2.3-475569?style=flat-square&logo=nvidia&logoColor=76B900&labelColor=64748b" height="22"/>&nbsp;
   <img alt="License Non-Commercial" src="https://img.shields.io/badge/License-Non--Commercial-475569?style=flat-square&labelColor=64748b" height="22"/>
 </p>
-
-## Community X1 Pro integration
-
-This fork includes selectable X1 Pro FX001 parallel and RM001 rotary grippers and a custom noodle-cooking simulation example. See [x1pro/README.md](x1pro/README.md) for installation, assets, and run commands.

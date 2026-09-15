@@ -27,13 +27,25 @@ If you already have the model bundle locally, link it into the fork without copy
 bash x1pro/init_assets.sh --from-dir /path/to/x1pro/assets
 ```
 
+The public bundle can be downloaded from [Google Drive](https://drive.google.com/drive/folders/1yjbJ4eWfCZwoM0ejFrjkhuAvDq_T4YAK?usp=sharing). Its root contains the two variant directories expected by the installer. For a command-line installation:
+
+```bash
+python3 -m pip install gdown
+mkdir -p .cache
+python3 -m gdown --folder \
+  "https://drive.google.com/drive/folders/1yjbJ4eWfCZwoM0ejFrjkhuAvDq_T4YAK?usp=sharing" \
+  -O .cache/x1pro-assets
+bash x1pro/init_assets.sh --from-dir .cache/x1pro-assets
+python3 x1pro/check_install.py
+```
+
 For a separately hosted Hugging Face **dataset** repository containing the same `x1pro/assets/` layout, use:
 
 ```bash
 bash x1pro/init_assets.sh --hf-repo OWNER/DATASET
 ```
 
-This fetches only `x1pro/assets/` into the ignored `.cache/` directory using sparse checkout and Git LFS, then links it into the code tree. No public X1 Pro dataset has been configured yet; the owner must confirm redistribution rights before one is published. The X1 Pro examples also use the bowl, bamboo texture and HDR from upstream `Assets/`. Check the local files after installing both asset sets:
+This fetches only `x1pro/assets/` into the ignored `.cache/` directory using sparse checkout and Git LFS, then links it into the code tree. The X1 Pro examples also use the bowl, bamboo texture and HDR from upstream `Assets/`. Check the local files after installing both asset sets:
 
 ```bash
 python x1pro/check_install.py
