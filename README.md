@@ -3,7 +3,7 @@
 This repository is a community extension of RoboDojo for the X-Square X1 Pro
 (EX001). It adds the fixed-base dual-arm robot, selectable FX001 parallel and
 RM001 rotary grippers, robot-mounted cameras, scripted X1 Pro data collection,
-a noodle-cooking scene, and real-robot trajectory replay.
+a noodle-cooking scene, real-robot trajectory replay, and local OpenPI policy rollouts.
 
 For the original benchmark, installation requirements, tasks, and policy
 integration, see the [official RoboDojo README](https://github.com/RoboDojo-Benchmark/RoboDojo#readme)
@@ -45,7 +45,67 @@ python3 x1pro/check_install.py
 ```
 
 See [x1pro/README.md](x1pro/README.md) for gripper selection, scene preview,
-expert collection, and real-trajectory replay commands.
+expert collection, real-trajectory replay, and OpenPI rollout commands.
+
+## Run the X1 Pro OpenPI noodle policy
+
+This fork includes a local bridge from the X1 Pro `smp2smp` OpenPI policy to
+the photo-reconstructed noodle workstation. The OpenPI source and checkpoint
+are separate from this repository. Use the
+[`x1pro_smp2smp`](https://github.com/ppppplus/openpi/tree/x1pro_smp2smp)
+branch and a matching checkpoint step directory containing `params/`,
+`assets/`, and `metadata/train_config.yaml`.
+
+Start the checkpoint server in one terminal. Follow the OpenPI repository's
+installation instructions first; the example below uses its `uv` environment:
+
+```bash
+git clone --branch x1pro_smp2smp git@github.com:ppppplus/openpi.git ../openpi-x1pro-smp2smp
+cd ../openpi-x1pro-smp2smp
+uv sync
+CUDA_VISIBLE_DEVICES=2 uv run scripts/serve_x1pro_checkpoint.py \
+  --checkpoint /path/to/checkpoint/29999 \
+  --port 8010
+```
+
+Run one simulated rollout from this repository in a second terminal:
+
+```bash
+cd /path/to/robodojo-x1pro
+export ROBODOJO_PYTHON=/path/to/robodojo-env/bin/python
+export ROBODOJO_GPU=1
+bash x1pro/noodle_scene/noodle_expert/run_openpi_rollout.sh \
+  data/openpi_place_noodles 90 place_noodles_in_pot
+```
+
+The script arguments are `OUTPUT`, executed 15 Hz action frames, and task ID.
+The supported task IDs and checkpoint prompts are:
+
+| Task ID | Exact checkpoint prompt |
+| :-- | :-- |
+| `place_noodles_in_pot` | Pick up the noodles from the white plate and place them into the pot. |
+| `sprinkle_chili_seasoning` | Pick up the pink chili shaker, sprinkle chili seasoning into the white bowl, then return the shaker to its starting spot. |
+| `sprinkle_green_onions` | Pick up the green bottle with the yellow spout, dispense green onion seasoning into the white bowl, then return the bottle to its starting spot. |
+| `sprinkle_salt` | Pick up the black salt shaker, sprinkle salt into the white bowl, then return the shaker to its starting spot. |
+| `transfer_noodles_to_bowl` | Pick up the metal strainer and transfer the noodles from the pot into the white bowl. |
+
+The bridge matches the real deployment contract: three `240x320` RGB inputs
+(`face_view`, `left_wrist_view`, and `right_wrist_view`), a `7x29` state
+sequence, 15 Hz control, three skipped latency rows, and ten executed rows per
+prediction chunk. The simulator has no physical master arms, so it maintains a
+virtual master-action queue. It also uses task-specific follower reference
+poses and gripper ranges, converts the X1 Pro controller frame through the
+robot's 90-degree base rotation, and starts with lift `0.45`, head pitch `0.1`,
+and head yaw `-0.1`.
+
+Each output directory contains `overview.mp4`, the three mounted-camera videos,
+`episode.hdf5`, `openpi_policy.json`, and `summary.json`. A status of
+`openpi_rollout_complete` means that the requested policy frames were executed;
+it is not a task-success label. This bridge is a community simulation adapter,
+not an official RoboDojo XPolicyLab integration or leaderboard evaluation.
+
+See [the noodle workstation README](x1pro/noodle_scene/noodle_expert/README.md)
+for the scene assumptions and data limitations.
 
 ---
 
