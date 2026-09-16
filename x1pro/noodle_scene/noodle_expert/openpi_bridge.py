@@ -17,6 +17,44 @@ import numpy as np
 import websockets.sync.client
 
 
+# Exact episode prompts stored with checkpoint 29999. The reference follower
+# poses and gripper ranges come from representative episodes in the matching
+# filtered real-robot dataset. They anchor live simulator motion in the
+# X2Robot controller coordinate system.
+TASK_SPECS: dict[str, dict[str, Any]] = {
+    "place_noodles_in_pot": {
+        "prompt": "Pick up the noodles from the white plate and place them into the pot.",
+        "left": [-0.00182585, 0.01061521, 0.00297701, -0.06088022, 0.01425371, 0.24652328, -0.00782013],
+        "right": [0.05300714, 0.02185267, 0.11441533, 0.25553318, 0.62425712, 0.54150861, -0.01430511],
+        "gripper": {"left": [-0.00782013, 4.50], "right": [-0.01430511, 3.96562958]},
+    },
+    "sprinkle_chili_seasoning": {
+        "prompt": "Pick up the pink chili shaker, sprinkle chili seasoning into the white bowl, then return the shaker to its starting spot.",
+        "left": [0.00506686, 0.00346641, 0.00060374, -0.08118435, 0.02541496, -0.13610072, -0.02040863],
+        "right": [-0.00157412, -0.00880805, 0.01528519, -0.01007537, -0.08731259, -0.19647355, 0.01544952],
+        "gripper": {"left": [-0.02040863, 4.50694275], "right": [0.01544952, 3.97]},
+    },
+    "sprinkle_green_onions": {
+        "prompt": "Pick up the green bottle with the yellow spout, dispense green onion seasoning into the white bowl, then return the bottle to its starting spot.",
+        "left": [0.00005827, 0.00348920, 0.00995069, 0.05389323, -0.07388153, 0.09218256, -0.01964569],
+        "right": [-0.00126885, 0.01987366, 0.00886175, -0.16789634, -0.06886999, 0.10000016, 0.01544952],
+        "gripper": {"left": [-0.05283451, 4.54547119], "right": [0.01544952, 3.97]},
+    },
+    "sprinkle_salt": {
+        "prompt": "Pick up the black salt shaker, sprinkle salt into the white bowl, then return the shaker to its starting spot.",
+        "left": [0.00149563, 0.01004708, 0.01184064, -0.19150748, -0.08546896, -0.09508662, -0.02117157],
+        "right": [-0.00058851, 0.00134421, 0.00242485, -0.12456199, 0.00015416, -0.03262997, 0.01544952],
+        "gripper": {"left": [-0.04062748, 4.49092102], "right": [0.01544952, 3.97]},
+    },
+    "transfer_noodles_to_bowl": {
+        "prompt": "Pick up the metal strainer and transfer the noodles from the pot into the white bowl.",
+        "left": [-0.00177138, 0.00167804, 0.00349001, -0.11692190, 0.00681590, 0.16067548, -0.00782013],
+        "right": [-0.00877922, 0.01310323, 0.05473353, 0.04043579, -0.35228738, 0.07738906, -0.00705719],
+        "gripper": {"left": [-0.00782013, 4.50], "right": [-0.00705719, 3.52540588]},
+    },
+}
+
+
 def _pack_array(value: Any) -> Any:
     if isinstance(value, np.ndarray):
         if value.dtype.kind in "VOc":
@@ -58,21 +96,25 @@ class OpenPiClient:
 
 
 class Smp2SmpSequence:
-    """State sequencing for the 14D slave + 14D master + phase policy."""
+    """Match the no-master-arm X1 Pro takeover sequence used on the real robot."""
 
     history_size = 3
     future_size = 3
     slave_dim = 14
     master_dim = 14
     action_dim = 29
+    latency_steps = 3
+    move_steps = 10
 
-    def __init__(self, initial_slave: np.ndarray, initial_master: np.ndarray | None = None, phase: float = 0.0) -> None:
+    def __init__(self, initial_slave: np.ndarray, phase: float = 0.0) -> None:
         slave = self._vector(initial_slave, self.slave_dim, "initial_slave")
-        master = slave.copy() if initial_master is None else self._vector(initial_master, self.master_dim, "initial_master")
-        self._past: deque[tuple[np.ndarray, np.ndarray]] = deque(
-            [(slave.copy(), master.copy())] * (self.history_size + 1), maxlen=self.history_size + 1
+        master_phase = np.concatenate((slave, [phase]), dtype=np.float32)
+        self._slave_history: deque[np.ndarray] = deque(
+            [slave.copy()] * (self.history_size + 1), maxlen=self.history_size + 1
         )
-        self.master = master
+        self._master_queue: deque[np.ndarray] = deque(
+            [master_phase.copy()] * (self.history_size + 1 + self.future_size), maxlen=100
+        )
         self.phase = float(phase)
         self.predicted_actions: np.ndarray | None = None
 
@@ -85,27 +127,34 @@ class Smp2SmpSequence:
 
     def observation(self, slave: np.ndarray, images: dict[str, np.ndarray], prompt: str) -> dict[str, Any]:
         slave = self._vector(slave, self.slave_dim, "slave")
-        current = np.concatenate((slave, self.master, [self.phase]), dtype=np.float32)
-        historical = [np.concatenate((old_slave, old_master, [self.phase]), dtype=np.float32) for old_slave, old_master in self._past]
-        future_master = self._future_master()
-        future = [np.concatenate((slave, master, [self.phase]), dtype=np.float32) for master in future_master]
-        state = np.stack([*historical[-self.history_size:], current, *future]).astype(np.float32)
+        history = list(self._slave_history)
+        history[-1] = slave.copy()
+        slave_rows = [*history[-(self.history_size + 1):], *([slave.copy()] * self.future_size)]
+        master_rows = list(self._master_queue)[-(self.history_size + 1 + self.future_size):]
+        state = np.stack(
+            [
+                np.concatenate((s, m[:self.master_dim], [m[self.master_dim]]), dtype=np.float32)
+                for s, m in zip(slave_rows, master_rows)
+            ]
+        ).astype(np.float32)
         if state.shape != (self.history_size + 1 + self.future_size, self.action_dim):
             raise AssertionError(state.shape)
         return {"images": images, "prompt": prompt, "state": state}
 
-    def commit(self, slave: np.ndarray, policy_result: dict[str, Any]) -> np.ndarray:
+    def commit(self, policy_result: dict[str, Any], max_steps: int | None = None) -> np.ndarray:
         actions = np.asarray(policy_result["actions"], dtype=np.float32)
         if actions.ndim != 2 or actions.shape[1] < self.action_dim:
             raise ValueError(f"expected [horizon,{self.action_dim}] actions, got {actions.shape}")
         self.predicted_actions = actions[:, :self.action_dim].copy()
-        self.master = self.predicted_actions[0, self.slave_dim : self.slave_dim + self.master_dim].copy()
-        self.phase = float(self.predicted_actions[0, 28])
-        self._past.append((self._vector(slave, self.slave_dim, "slave").copy(), self.master.copy()))
-        return self.master.copy()
+        end = self.latency_steps + self.move_steps
+        planned = self.predicted_actions[self.latency_steps:end, self.slave_dim:self.action_dim].copy()
+        if max_steps is not None:
+            planned = planned[:max_steps]
+        if len(planned) == 0:
+            raise ValueError(f"action horizon {len(actions)} is too short for latency {self.latency_steps}")
+        self._master_queue.extend(planned)
+        self.phase = float(planned[-1, self.master_dim])
+        return planned
 
-    def _future_master(self) -> list[np.ndarray]:
-        if self.predicted_actions is None:
-            return [self.master.copy() for _ in range(self.future_size)]
-        masters = self.predicted_actions[:, self.slave_dim : self.slave_dim + self.master_dim]
-        return [masters[min(index + 1, len(masters) - 1)].copy() for index in range(self.future_size)]
+    def record_slave(self, slave: np.ndarray) -> None:
+        self._slave_history.append(self._vector(slave, self.slave_dim, "slave").copy())

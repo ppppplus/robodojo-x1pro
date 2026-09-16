@@ -5,7 +5,8 @@ HERE=Path(__file__).resolve().parent;ROOT=HERE.parents[2]
 sys.path[:0]=[str(ROOT),str(ROOT/'x1pro'),str(HERE)]
 os.environ['ROBODOJO_EX001_GRIPPER']='fx001_h_evt1';os.environ.pop('ROBODOJO_EX001_USD',None)
 from isaaclab.app import AppLauncher
-p=argparse.ArgumentParser();p.add_argument('--output',required=True);p.add_argument('--fast',action='store_true');p.add_argument('--basket-test',action='store_true');p.add_argument('--pour-only',action='store_true');p.add_argument('--initial-episode',default=None);p.add_argument('--force-test',action='store_true');p.add_argument('--scene-only',action='store_true');p.add_argument('--replay-json',default=None,help='Replay a robot-bridge JSON trajectory using follow_* joint states');p.add_argument('--openpi-steps',type=int,default=0,help='Run this many 15 Hz OpenPI policy decisions in the scene');p.add_argument('--openpi-host',default='127.0.0.1');p.add_argument('--openpi-port',type=int,default=8000);p.add_argument('--openpi-prompt',default='Pick up noodles from white plate and put them into the cooking pot.');AppLauncher.add_app_launcher_args(p);args=p.parse_args()
+OPENPI_TASKS=('place_noodles_in_pot','sprinkle_chili_seasoning','sprinkle_green_onions','sprinkle_salt','transfer_noodles_to_bowl')
+p=argparse.ArgumentParser();p.add_argument('--output',required=True);p.add_argument('--fast',action='store_true');p.add_argument('--basket-test',action='store_true');p.add_argument('--pour-only',action='store_true');p.add_argument('--initial-episode',default=None);p.add_argument('--force-test',action='store_true');p.add_argument('--scene-only',action='store_true');p.add_argument('--replay-json',default=None,help='Replay a robot-bridge JSON trajectory using follow_* joint states');p.add_argument('--openpi-steps',type=int,default=0,help='Execute this many 15 Hz policy action frames using 3-frame latency and 10-frame chunks');p.add_argument('--openpi-task',choices=OPENPI_TASKS,default='place_noodles_in_pot');p.add_argument('--openpi-host',default='127.0.0.1');p.add_argument('--openpi-port',type=int,default=8000);p.add_argument('--openpi-prompt',default=None,help='Optional override; by default use the exact prompt stored with checkpoint 29999');AppLauncher.add_app_launcher_args(p);args=p.parse_args()
 OUT=Path(args.output);OUT.mkdir(parents=True,exist_ok=True)
 if (OUT/'summary.json').exists():raise FileExistsError(OUT)
 (OUT/'collector_source.py').write_text(Path(__file__).read_text());(OUT/'scene_builder_source.py').write_text((HERE/'scene_builder.py').read_text());(OUT/'seasoning.py').write_text((HERE/'seasoning.py').read_text())
@@ -26,7 +27,7 @@ try:
  from utils.save_file import VideoStreamWriter
  from kinematics import Kinematics
  from scene_builder import build_scene
- dt=1/240;fps=5 if args.fast else 10;stride=round(1/dt/fps)
+ dt=1/240;fps=5 if args.fast else (15 if args.openpi_steps else 10);stride=round(1/dt/fps)
  sim=su.SimulationContext(su.SimulationCfg(dt=dt,device=args.device,render=su.RenderCfg(enable_reflections=True,enable_global_illumination=True,rendering_mode='quality')));stage=sim.stage
  sc=build_scene(stage);cube=sc['cube'];lathe=sc['lathe'];xform=sc['xform']
  physics_mat=UsdShade.Material.Define(stage,'/World/Materials/Contact');pm=UsdPhysics.MaterialAPI.Apply(physics_mat.GetPrim());pm.CreateStaticFrictionAttr(1.0);pm.CreateDynamicFrictionAttr(.8);pm.CreateRestitutionAttr(0.)
@@ -46,11 +47,11 @@ try:
  for n in ['NoodlePlate','BoilerDeck0','BoilerDeck1']:
   collision(stage.GetPrimAtPath('/World/Set/'+n),mesh=True)
  # A compound well wall avoids the folded visual lip trapping the basket flange.
- for wi,(cx,cy) in enumerate([(.495,.037),(.495,.273)]):
+ for wi,(cx,cy) in enumerate([(.42,-.068),(.42,.168)]):
   for j,a in enumerate(np.arange(32)*2*np.pi/32):
    ob=cube(f'WellProxy{wi}_{j}',(cx+.095*np.cos(a),cy+.095*np.sin(a),.963),(1,1,1),'steel');xf=UsdGeom.Xformable(ob);xf.ClearXformOpOrder();xf.AddTranslateOp().Set(Gf.Vec3d(cx+.095*np.cos(a),cy+.095*np.sin(a),.963));xf.AddRotateZOp().Set(np.rad2deg(a));xf.AddScaleOp().Set(Gf.Vec3f(.004,.019,.170));collision(ob.GetPrim(),hidden=True)
   ob=sc['cyl'](f'WellProxyBottom{wi}',(cx,cy,.879),.095,.008,'steel');collision(ob.GetPrim(),hidden=True)
- lathe('BowlCollision',(-.035,-.025,.766),[(0,0),(.05,0),(.076,.015),(.098,.065),(.094,.070),(.075,.027),(.05,.009),(0,.009)],'porcelain')
+ lathe('BowlCollision',(-.035,-.025,.75),[(0,0),(.05,0),(.076,.015),(.098,.065),(.094,.070),(.075,.027),(.05,.009),(0,.009)],'porcelain')
  collision(stage.GetPrimAtPath('/World/Set/BowlCollision'),mesh=True,hidden=True)
  def dynamic(path,mass):
   prim=stage.GetPrimAtPath(path);UsdPhysics.RigidBodyAPI.Apply(prim).CreateRigidBodyEnabledAttr(True);UsdPhysics.MassAPI.Apply(prim).CreateMassAttr(mass)
@@ -60,7 +61,7 @@ try:
  for i in range(2):
   box(f'Noodle{i}/Collision',(0,0,0),(.052,.068,.029));objects.append(dynamic(f'/World/Set/Noodle{i}',.045))
  # Put the removable front basket's existing visual geometry into a rigid frame.
- b0=np.array([.495,.037,.928]);basket=UsdGeom.Xform.Define(stage,'/World/Set/MovingBasket');xform(basket,b0)
+ b0=np.array([.42,-.068,.912]);basket=UsdGeom.Xform.Define(stage,'/World/Set/MovingBasket');xform(basket,b0)
  edits=Sdf.BatchNamespaceEdit()
  for prim in list(stage.GetPrimAtPath('/World/Set').GetChildren()):
   n=prim.GetName()
@@ -82,7 +83,7 @@ try:
  for prim in stage.GetPrimAtPath('/World/Set/MovingBasket').GetChildren():
   if prim.GetName().startswith('Wall') or prim.GetName()=='Bottom':UsdShade.MaterialBindingAPI.Apply(prim).Bind(slide_mat,materialPurpose='physics')
  PROFILE=gripper_profile();base=(.05,-.65,0);lift=.45
- cfg=get_robot_config();cfg.prim_path='/World/EX001';cfg.init_state.pos=base;cfg.init_state.rot=(.707106781,0,0,.707106781);cfg.init_state.joint_pos['lift_joint']=lift;cfg.init_state.joint_pos['head_pitch_joint']=.45
+ cfg=get_robot_config();cfg.prim_path='/World/EX001';cfg.init_state.pos=base;cfg.init_state.rot=(.707106781,0,0,.707106781);cfg.init_state.joint_pos['lift_joint']=lift;cfg.init_state.joint_pos['head_pitch_joint']=.1;cfg.init_state.joint_pos['head_yaw_joint']=-.1
  robot=Articulation(cfg)
  # Keep the original imported finger geometry and frictional contact; no grasp joints.
  for prim in Usd.PrimRange(stage.GetPrimAtPath('/World/EX001')):
@@ -118,16 +119,21 @@ try:
   for _ in range(240):objects[2].write_data_to_sim();step_physics(target)
   print('FORCE_TEST_FINAL',objstate()[2].tolist(),flush=True)
   raise RuntimeError('Diagnostic force test completed; not a demonstration')
- if (args.basket_test or args.pour_only) and not args.initial_episode:
+ if (args.basket_test or args.pour_only or args.openpi_task=='transfer_noodles_to_bowl') and not args.initial_episode:
   for i in range(2):
-   pos=objects[i].data.root_state_w[:,:7].clone();pos[0,:3]=torch.tensor([.495,.037,.949+i*.032],device=args.device);pos[0,3:]=torch.tensor([1.,0.,0.,0.],device=args.device);objects[i].write_root_pose_to_sim(pos);objects[i].write_root_velocity_to_sim(torch.zeros((1,6),device=args.device))
+   pos=objects[i].data.root_state_w[:,:7].clone();pos[0,:3]=torch.tensor([.42,-.068,.933+i*.032],device=args.device);pos[0,3:]=torch.tensor([1.,0.,0.,0.],device=args.device);objects[i].write_root_pose_to_sim(pos);objects[i].write_root_velocity_to_sim(torch.zeros((1,6),device=args.device))
+  for _ in range(240):step_physics(target)
+ if args.openpi_task in ('sprinkle_chili_seasoning','sprinkle_green_onions','sprinkle_salt') and not args.initial_episode:
+  # Seasoning demonstrations start after cooking, with noodles already in the bowl.
+  for i,xyz in enumerate([(-.065,-.025,.787),(.005,-.025,.801)]):
+   pose=objects[i].data.root_state_w[:,:7].clone();pose[0,:3]=torch.tensor(xyz,device=args.device);pose[0,3:]=torch.tensor([1.,0.,0.,0.],device=args.device);objects[i].write_root_pose_to_sim(pose);objects[i].write_root_velocity_to_sim(torch.zeros((1,6),device=args.device))
   for _ in range(240):step_physics(target)
  k=Kinematics(PROFILE['urdf'],base=base,lift=lift,tcp=nominal_tcp(PROFILE));arm_ids=[index[n] for n in k.names];gm=index['right_arm_gripper']
  h5=h5py.File(OUT/'episode.hdf5','w');datasets=[]
  for name,ann,param,(w,h) in cameras:
   datasets.append(h5.create_dataset('observations/images/'+name,shape=(0,h,w,3),maxshape=(None,h,w,3),dtype='u1',chunks=(1,h,w,3),compression='lzf'));writers.append(VideoStreamWriter(str(OUT/(name+'.mp4')),h,w,3,fps))
  for _ in range(16):sim.render()
- step=0;states=[];velocities=[];actions=[];poses=[];image_steps=[];camera_poses=[];phases=[];phase_ids=[];phase_name='initial';checks=[];error=None;start_time=time.monotonic();initial_objects=objstate();replay_done=False;replay_source=None;latest_images={};openpi_events=[]
+ step=0;states=[];velocities=[];actions=[];poses=[];image_steps=[];camera_poses=[];phases=[];phase_ids=[];phase_name='initial';checks=[];error=None;start_time=time.monotonic();initial_objects=objstate();replay_done=False;replay_source=None;latest_images={};openpi_events=[];openpi_prompt_used=None
  font=ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',20)
  def capture(final=False):
   sim.render();sim.render();cp=[]
@@ -254,11 +260,14 @@ try:
    if vals: print('REPLAY_GRIPPER',json.dumps({'side':side,'min':min(vals),'max':max(vals),'unique':len(set(vals)),'calibration':replay_gripper_cal.get(side)}),flush=True)
  if args.openpi_steps:
   if args.fast:raise ValueError('--openpi-steps requires the two wrist cameras; omit --fast')
-  from openpi_bridge import OpenPiClient,Smp2SmpSequence
-  # The raw X2Robot poses are control-frame coordinates.  The adapter anchors
-  # their recorded rest poses at the corresponding simulated TCP pose, so the
-  # policy retains its trained local geometry while IK remains in USD world axes.
-  refs={'left':np.array([.0030,-.0012,.0039,-.1625,.0019,.0775,-.0078],dtype=np.float32),'right':np.array([-.0046,-.0075,.0620,.0977,-.2749,-.0446,-.0143],dtype=np.float32)}
+  from openpi_bridge import OpenPiClient,Smp2SmpSequence,TASK_SPECS
+  spec=TASK_SPECS[args.openpi_task];openpi_prompt_used=args.openpi_prompt or spec['prompt']
+  refs={side:np.asarray(spec[side],dtype=np.float32) for side in ('left','right')}
+  gripper_ranges=spec['gripper']
+  # The robot base is rotated +90 degrees around world Z. Convert between the
+  # X2Robot controller frame used by the checkpoint and RoboDojo world axes.
+  policy_axes=Rotation.from_euler('z',90,degrees=True).as_matrix()
+  reference_rot={side:Rotation.from_euler('xyz',refs[side][3:6]).as_matrix() for side in ('left','right')}
   kin={side:Kinematics(PROFILE['urdf'],side=side,base=base,lift=lift,tcp=nominal_tcp(PROFILE)) for side in ('left','right')}
   arm_index={side:[index[f'{side}_arm_joint{i}'] for i in range(1,7)] for side in ('left','right')}
   motor_index={side:index[f'{side}_arm_gripper'] for side in ('left','right')}
@@ -267,49 +276,65 @@ try:
   home={side:tcp_pose(side) for side in ('left','right')}
   def policy_slave():
    values=[]
+   live=state()
    for side in ('left','right'):
-    current=tcp_pose(side);rotation=Rotation.from_matrix(home[side][:3,:3].T@current[:3,:3]).as_euler('xyz')
-    position=refs[side][:3]+current[:3,3]-home[side][:3,3]
-    motor=float(state()[motor_index[side]])
-    gripper=refs[side][6]+motor/PROFILE['motor_open']*3.5847
-    values.extend([*position,* (refs[side][3:6]+rotation),gripper])
+    current=tcp_pose(side)
+    position=refs[side][:3]+policy_axes.T@(current[:3,3]-home[side][:3,3])
+    policy_rot=policy_axes.T@current[:3,:3]@home[side][:3,:3].T@policy_axes@reference_rot[side]
+    rotation=Rotation.from_matrix(policy_rot).as_euler('xyz')
+    closed,opened=gripper_ranges[side];motor=float(live[motor_index[side]])
+    gripper=closed+motor/PROFILE['motor_open']*(opened-closed)
+    values.extend([*position,*rotation,gripper])
    return np.asarray(values,dtype=np.float32)
   def target_from_master(master):
    goal=target.clone();diagnostics=[]
    for offset,side in ((0,'left'),(7,'right')):
     current=tcp_pose(side);raw=np.asarray(master[offset:offset+7],dtype=float)
-    desired_pos=home[side][:3,3]+raw[:3]-refs[side][:3]
+    desired_pos=home[side][:3,3]+policy_axes@(raw[:3]-refs[side][:3])
     displacement=desired_pos-current[:3,3];distance=float(np.linalg.norm(displacement))
     if distance>.035:desired_pos=current[:3,3]+displacement/distance*.035
-    desired_rot=home[side][:3,:3]@Rotation.from_euler('xyz',raw[3:6]-refs[side][3:6]).as_matrix()
+    raw_rot=Rotation.from_euler('xyz',raw[3:6]).as_matrix()
+    desired_rot=policy_axes@raw_rot@reference_rot[side].T@policy_axes.T@home[side][:3,:3]
     rel=Rotation.from_matrix(desired_rot@current[:3,:3].T);angle=rel.magnitude()
     if angle>.28:desired_rot=Rotation.from_rotvec(rel.as_rotvec()/angle*.28).as_matrix()@current[:3,:3]
-    q=kin[side].ik(desired_pos,desired_rot,state()[arm_index[side]],attempts=6)
+    ik_error=None
+    try:q=kin[side].ik(desired_pos,desired_rot,state()[arm_index[side]],attempts=10)
+    except RuntimeError as exc:
+     # A real controller also rejects a single unreachable Cartesian command
+     # without aborting the policy stream. Hold this arm for that 15 Hz frame.
+     q=state()[arm_index[side]];ik_error=str(exc)
     goal[0,arm_index[side]]=torch.as_tensor(q,device=args.device,dtype=torch.float32)
-    motor=(raw[6]-refs[side][6])/3.5847*PROFILE['motor_open']
+    closed,opened=gripper_ranges[side]
+    motor=(raw[6]-closed)/(opened-closed)*PROFILE['motor_open'] if opened>closed else 0.
     goal[0,motor_index[side]]=float(np.clip(motor,0.,PROFILE['motor_open']))
-    diagnostics.append({'side':side,'target_position':desired_pos.tolist(),'translation_clamped_m':max(0.,distance-.035),'rotation_clamped_rad':max(0.,angle-.28),'motor_target':float(goal[0,motor_index[side]])})
+    diagnostics.append({'side':side,'target_position':desired_pos.tolist(),'translation_clamped_m':max(0.,distance-.035),'rotation_clamped_rad':max(0.,angle-.28),'motor_target':float(goal[0,motor_index[side]]),'ik_error':ik_error})
    return goal,diagnostics
-  phase('openpi_policy_rollout');capture()
-  client=OpenPiClient(args.openpi_host,args.openpi_port)
-  sequence=Smp2SmpSequence(policy_slave())
+  phase('openpi_policy_rollout_'+args.openpi_task);capture()
+  client=OpenPiClient(args.openpi_host,args.openpi_port);sequence=Smp2SmpSequence(policy_slave())
+  executed=0;inference_index=0
   try:
-   for decision in range(args.openpi_steps):
+   while executed<args.openpi_steps:
     policy_cameras={'face_view':'cam_head','left_wrist_view':'cam_left_wrist','right_wrist_view':'cam_right_wrist'}
     for policy_name,camera_name in policy_cameras.items():
      if camera_name not in latest_images:raise RuntimeError(f'Missing OpenPI camera frame: {camera_name} for {policy_name}')
     images={policy_name:np.asarray(Image.fromarray(latest_images[camera_name]).resize((320,240)),dtype=np.uint8) for policy_name,camera_name in policy_cameras.items()}
-    slave=policy_slave();result=client.infer(sequence.observation(slave,images,args.openpi_prompt));master=sequence.commit(slave,result)
-    goal,diagnostics=target_from_master(master);start=target.clone()
-    for alpha in np.linspace(0.,1.,16)[1:]:target.copy_(start+(goal-start)*alpha);tick()
-    event={'decision':decision,'master_target':master.tolist(),'phase':sequence.phase,'server_timing':{k:float(v) for k,v in result.get('server_timing',{}).items()},'controller':diagnostics}
-    openpi_events.append(event);print('OPENPI_STEP',json.dumps(event),flush=True);capture()
+    slave=policy_slave();observation=sequence.observation(slave,images,openpi_prompt_used);result=client.infer(observation)
+    planned=sequence.commit(result,max_steps=args.openpi_steps-executed)
+    timing={k:float(v) for k,v in result.get('server_timing',{}).items()}
+    for chunk_index,master_phase in enumerate(planned):
+     goal,diagnostics=target_from_master(master_phase[:14]);start=target.clone()
+     # 240 Hz simulation / 15 Hz controller = exactly 16 physics ticks.
+     for alpha in np.linspace(0.,1.,17)[1:]:target.copy_(start+(goal-start)*alpha);tick()
+     actual=policy_slave();sequence.record_slave(actual)
+     event={'executed_step':executed,'inference_index':inference_index,'action_row':sequence.latency_steps+chunk_index,'master_target':master_phase[:14].tolist(),'phase':float(master_phase[14]),'prompt':openpi_prompt_used,'server_timing':timing if chunk_index==0 else {},'controller':diagnostics}
+     openpi_events.append(event);print('OPENPI_STEP',json.dumps(event),flush=True);executed+=1
+    inference_index+=1
   finally:
    client.close()
-  (OUT/'openpi_policy.json').write_text(json.dumps({'prompt':args.openpi_prompt,'decisions':openpi_events,'observation_shape':[7,29],'image_shape':[240,320,3],'control_hz':15},indent=2))
+  (OUT/'openpi_policy.json').write_text(json.dumps({'task':args.openpi_task,'prompt':openpi_prompt_used,'executed_steps':executed,'inference_chunks':inference_index,'latency_steps':sequence.latency_steps,'move_steps':sequence.move_steps,'decisions':openpi_events,'observation_shape':[7,29],'image_shape':[240,320,3],'control_hz':15},indent=2))
   args.scene_only=True
  try:
-  phase('noodles_in_basket' if (args.basket_test or args.pour_only) else 'two_noodle_bundles_on_one_plate');hold(.5)
+  phase('noodles_in_basket' if (args.basket_test or args.pour_only or (args.openpi_steps and args.openpi_task=='transfer_noodles_to_bowl')) else 'two_noodle_bundles_on_one_plate');hold(.5)
   stage.GetRootLayer().Export(str(OUT/'scene.usda'))
   if not args.scene_only:
    for i in ([] if (args.basket_test or args.pour_only) else range(2)):
@@ -319,7 +344,7 @@ try:
     grip(0.,f'grasp_noodle_{i}');move(p0+[0,0,.18],down,f'lift_noodle_{i}')
     dz=float(objstate()[i,2]-p0[2]);check(f'noodle_{i}_lift_m',dz,dz>.10)
     offset=tcp()[:3,:3].T@(objstate()[i,:3]-tcp()[:3,3])
-    move([.495,.037,1.16],potrot,f'transfer_noodle_{i}_above_cooker')
+    move([.42,-.068,1.144],potrot,f'transfer_noodle_{i}_above_cooker')
     slip=float(np.linalg.norm(objstate()[i,:3]-tcp()[:3,3]-tcp()[:3,:3]@offset));check(f'noodle_{i}_retention_error_m',slip,slip<.025)
     grip(5.,f'release_noodle_{i}_into_basket');hold(1.)
     inside,v=in_basket(i);check(f'noodle_{i}_in_basket',v.tolist(),inside)
@@ -333,7 +358,7 @@ try:
    # Rotate the held basket about its mouth; gravity releases the two bundles.
    held=tcp();br=Rotation.from_quat(objstate()[2,[4,5,6,3]]).as_matrix();basket_grasp_offset=held[:3,:3].T@(objstate()[2,:3]-held[:3,3]);basket_grasp_rotation=held[:3,:3].T@br;basket_mouth=objstate()[2,:3]+br@np.array([0,0,.133]);hand_offset=held[:3,3]-basket_mouth
    move(np.array([.22,-.025,1.25])+hand_offset,hand,'clear_cooker_at_high_position',speed=.06)
-   pour_center=np.array([.04,-.012,1.15]);move(pour_center+hand_offset,hand,'move_basket_above_bowl',speed=.04)
+   pour_center=np.array([.04,-.012,1.134]);move(pour_center+hand_offset,hand,'move_basket_above_bowl',speed=.04)
    check('basket_transfer_retention_m',float(np.linalg.norm(objstate()[2,:3]-(tcp()[:3,3]+tcp()[:3,:3]@basket_grasp_offset))),np.linalg.norm(objstate()[2,:3]-(tcp()[:3,3]+tcp()[:3,:3]@basket_grasp_offset))<.03)
    for angle in [10,20,30,40,50,60,70,80,85,90,94,98]:
     r=Rotation.from_euler('z',10,degrees=True).as_matrix()@Rotation.from_euler('y',-angle,degrees=True).as_matrix()@br.T;move(pour_center+r@hand_offset,r@held[:3,:3],f'pour_basket_{angle}_degrees',speed=.045,adaptive=True)
@@ -347,12 +372,12 @@ try:
  states.append(state());velocities.append(robot.data.joint_vel[0].cpu().numpy().copy());poses.append(objstate());capture(final=True)
  success=bool(error is None and not replay_done and not args.scene_only and not args.basket_test and len(checks)>=(7 if args.pour_only else 10) and all(c['passed'] for c in checks))
  for key,data in [('observations/joint_position',states),('observations/joint_velocity',velocities),('observations/object_pose_wxyz',poses),('actions/joint_position',actions),('image_step',image_steps),('phase_id',phase_ids),('timestamp',np.arange(len(states))*dt),('observations/camera_to_world',camera_poses)]:h5.create_dataset(key,data=np.asarray(data))
- conditions={'fixed_base':True,'base_position':base,'initial_lift_height_m':lift,'lift_control':'fixed during food transfer, IK coordinated during pouring','robot_gravity_compensation':True,'self_collision':False,'noodle_model':'two independent rigid bundles, not deformable noodles','basket_collision':'compound shell, bottom, handle and rim supports','well_collision':'compound open wall and bottom; decorative folded lip excluded','bowl_collision':'static concave proxy matching visual bowl','friction_static':1.,'friction_dynamic':.8,'food_friction_static_dynamic':[.10,.06],'basket_interior_friction_static_dynamic':[.12,.08],'contact_parameters':'estimated, not measured on the real food or hardware','objects_gravity_and_contact':True,'object_teleports_during_episode':0,'object_attachment_joints':0,'robot_state_writes_during_episode':0,'cooking_and_water_simulated':False,'scene_scale':'estimated from photo, not calibrated'}
+ conditions={'fixed_base':True,'base_position':base,'initial_lift_height_m':lift,'lift_control':'fixed during food transfer, IK coordinated during pouring','robot_gravity_compensation':True,'self_collision':False,'noodle_model':'two independent rigid bundles, not deformable noodles','basket_collision':'compound shell, bottom, handle and rim supports','well_collision':'compound open wall and bottom; decorative folded lip excluded','bowl_collision':'static concave proxy matching visual bowl','friction_static':1.,'friction_dynamic':.8,'food_friction_static_dynamic':[.10,.06],'basket_interior_friction_static_dynamic':[.12,.08],'contact_parameters':'estimated, not measured on the real food or hardware','objects_gravity_and_contact':True,'object_teleports_during_episode':0,'object_attachment_joints':0,'robot_state_writes_during_episode':0,'cooking_and_water_simulated':False,'table_top_size_m':[1.20,.60],'table_top_height_m':.75,'table_finish':'white','scene_scale':'table dimensions supplied by user; remaining object dimensions estimated from photo'}
  h5.attrs.update(task='pour_two_noodles_into_bowl' if args.pour_only else 'photo_noodle_transfer',robot='X1 Pro DVT2/PVT1',gripper_type=PROFILE['name'],expert_demonstration=success,success=success,physics_dt=dt,image_fps=fps,joint_names_json=json.dumps(names),object_names_json=json.dumps(['noodle_0','noodle_1','front_basket']),camera_names_json=json.dumps([c[0] for c in cameras]),camera_mounts_json=json.dumps(mounts),camera_intrinsics_json=json.dumps(D435),camera_pose_convention='USD camera -Z forward +Y up; matrices from renderer at image_step',action_semantics='23 absolute joint position drive targets; radians or metres according to URDF; state[t] precedes action[t], includes terminal state',conditions_json=json.dumps(conditions),phases_json=json.dumps(phases),error=error or '')
  h5.close();h5=None
  for w in writers:w.close()
  writers=[]
- summary={'task':'openpi_policy_rollout' if args.openpi_steps else ('real_robot_replay' if replay_done else ('pour_two_noodles_into_bowl' if args.pour_only else 'photo_noodle_transfer')),'status':'openpi_rollout_complete' if args.openpi_steps and error is None else ('replay_complete' if replay_done and error is None else ('success' if success else ('scene_preview' if args.scene_only else 'failed_attempt'))) ,'expert_demonstration':success,'replay_source':replay_source,'error':error,'gripper_type':PROFILE['name'],'camera_mount':{'head_source':'mounted_urdf_rgb_optical_frame'},'camera_names':[c[0] for c in cameras],'diagnostic_basket_only':args.basket_test,'simulation_seconds':step*dt,'physics_steps':step,'frames_per_camera':len(image_steps),'fps':fps,'checks':checks,'conditions':conditions,'phases':phases,'initial_object_poses':initial_objects.tolist(),'final_object_poses':objstate().tolist(),'wall_seconds':time.monotonic()-start_time,'data_file':str(OUT/'episode.hdf5'),'video':str(OUT/'overview.mp4'),'openpi':{'decisions':len(openpi_events),'prompt':args.openpi_prompt if args.openpi_steps else None,'trace':str(OUT/'openpi_policy.json') if args.openpi_steps else None}}
+ summary={'task':'openpi_policy_rollout' if args.openpi_steps else ('real_robot_replay' if replay_done else ('pour_two_noodles_into_bowl' if args.pour_only else 'photo_noodle_transfer')),'status':'openpi_rollout_complete' if args.openpi_steps and error is None else ('replay_complete' if replay_done and error is None else ('success' if success else ('scene_preview' if args.scene_only else 'failed_attempt'))) ,'expert_demonstration':success,'replay_source':replay_source,'error':error,'gripper_type':PROFILE['name'],'camera_mount':{'head_source':'mounted_urdf_rgb_optical_frame'},'camera_names':[c[0] for c in cameras],'diagnostic_basket_only':args.basket_test,'simulation_seconds':step*dt,'physics_steps':step,'frames_per_camera':len(image_steps),'fps':fps,'checks':checks,'conditions':conditions,'phases':phases,'initial_object_poses':initial_objects.tolist(),'final_object_poses':objstate().tolist(),'wall_seconds':time.monotonic()-start_time,'data_file':str(OUT/'episode.hdf5'),'video':str(OUT/'overview.mp4'),'openpi':{'decisions':len(openpi_events),'task':args.openpi_task if args.openpi_steps else None,'prompt':openpi_prompt_used if args.openpi_steps else None,'latency_steps':3 if args.openpi_steps else None,'move_steps':10 if args.openpi_steps else None,'trace':str(OUT/'openpi_policy.json') if args.openpi_steps else None}}
  (OUT/'summary.json').write_text(json.dumps(summary,indent=2));print('NOODLE_DONE',json.dumps(summary),flush=True);code=0 if success or args.scene_only else 2
 except BaseException:
  (OUT/'failure.txt').write_text(traceback.format_exc());traceback.print_exc()
